@@ -16,10 +16,10 @@ import java.util.Properties;
 import org.apache.spark.sql.Row;
 
 
-public class SparkPartitionWriter extends AbstractPartitionWriter {
+public class SparkPartitionWriterToKafka extends AbstractPartitionWriter {
   private final SparkDataWriterTaskTracker dataWriterTaskTracker;
 
-  public SparkPartitionWriter(Properties jobProperties, DataWriterAccumulators accumulators) {
+  public SparkPartitionWriterToKafka(Properties jobProperties, DataWriterAccumulators accumulators) {
     dataWriterTaskTracker = new SparkDataWriterTaskTracker(accumulators);
     super.configure(new SparkEngineTaskConfigProvider(jobProperties));
   }
