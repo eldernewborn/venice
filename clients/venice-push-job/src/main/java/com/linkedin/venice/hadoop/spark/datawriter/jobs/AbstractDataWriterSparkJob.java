@@ -60,7 +60,7 @@ import com.linkedin.venice.hadoop.spark.datawriter.partition.VeniceSparkPartitio
 import com.linkedin.venice.hadoop.spark.datawriter.recordprocessor.SparkInputRecordProcessorFactory;
 import com.linkedin.venice.hadoop.spark.datawriter.task.DataWriterAccumulators;
 import com.linkedin.venice.hadoop.spark.datawriter.task.SparkDataWriterTaskTracker;
-import com.linkedin.venice.hadoop.spark.datawriter.writer.SparkPartitionWriterFactory;
+import com.linkedin.venice.hadoop.spark.datawriter.writer.SparkPartitionWriterToKafkaFactory;
 import com.linkedin.venice.hadoop.spark.utils.SparkPartitionUtils;
 import com.linkedin.venice.hadoop.spark.utils.SparkScalaUtils;
 import com.linkedin.venice.hadoop.ssl.TempFileSSLConfigurator;
@@ -153,7 +153,7 @@ public abstract class AbstractDataWriterSparkJob extends DataWriterComputeJob {
 
     // Write the data to PubSub
     dataFrameForDataWriterJob = dataFrameForDataWriterJob.mapPartitions(
-        new SparkPartitionWriterFactory(broadcastProperties, accumulatorsForDataWriterJob),
+        new SparkPartitionWriterToKafkaFactory(broadcastProperties, accumulatorsForDataWriterJob),
         rowEncoderWithPartition);
 
     this.dataFrame = dataFrameForDataWriterJob;
@@ -215,7 +215,7 @@ public abstract class AbstractDataWriterSparkJob extends DataWriterComputeJob {
     jobConf.set(PARTITIONER_CLASS, pushJobSetting.partitionerClass);
     // flatten partitionerParams since RuntimeConfig class does not support set an object
     if (pushJobSetting.partitionerParams != null) {
-      pushJobSetting.partitionerParams.forEach((key, value) -> jobConf.set(key, value));
+      pushJobSetting.partitionerParams.forEach(jobConf::set);
     }
     jobConf.set(PARTITION_COUNT, pushJobSetting.partitionCount);
     if (pushJobSetting.sslToKafka) {

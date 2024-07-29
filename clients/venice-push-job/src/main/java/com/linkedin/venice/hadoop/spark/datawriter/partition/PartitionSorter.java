@@ -1,5 +1,6 @@
 package com.linkedin.venice.hadoop.spark.datawriter.partition;
 
+import com.linkedin.venice.hadoop.spark.datawriter.writer.SparkPartitionWriterToKafka;
 import com.linkedin.venice.utils.ArrayUtils;
 import java.io.Serializable;
 import java.util.Comparator;
@@ -10,7 +11,7 @@ import org.apache.spark.sql.Row;
  * Sort the rows based on the key and value in ascending order using unsigned byte comparison.
  * <ul>
  *   <li>The sorting on the key is the same as what RocksDB and Shuffle-Sort in MapReduce use.</li>
- *   <li>The sorting on the value is to make {@link com.linkedin.venice.hadoop.spark.datawriter.writer.SparkPartitionWriter} be able to optimize the de-duping of values.</li>
+ *   <li>The sorting on the value is to make {@link SparkPartitionWriterToKafka} be able to optimize the de-duping of values.</li>
  * </ul>
  */
 public class PartitionSorter implements Comparator<Row>, Serializable {
