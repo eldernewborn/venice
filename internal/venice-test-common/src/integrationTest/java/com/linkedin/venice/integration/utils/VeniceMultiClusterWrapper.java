@@ -9,6 +9,7 @@ import com.linkedin.d2.balancer.D2Client;
 import com.linkedin.venice.D2.D2ClientUtils;
 import com.linkedin.venice.client.store.ClientConfig;
 import com.linkedin.venice.exceptions.VeniceException;
+import com.linkedin.venice.utils.LogContext;
 import com.linkedin.venice.utils.SslUtils;
 import com.linkedin.venice.utils.Time;
 import com.linkedin.venice.utils.Utils;
@@ -59,11 +60,23 @@ public class VeniceMultiClusterWrapper extends ProcessWrapper {
     Map<Integer, VeniceControllerWrapper> controllerMap = new HashMap<>();
     ZkServerWrapper zkServerWrapper = options.getZkServerWrapper();
     PubSubBrokerWrapper pubSubBrokerWrapper = options.getKafkaBrokerWrapper();
+    Map<String, D2Client> d2Clients = options.getD2Clients();
 
     try {
       if (zkServerWrapper == null) {
         zkServerWrapper = ServiceFactory.getZkServer();
       }
+
+      // Set local d2Client for the cluster.
+      String regionName = options.getRegionName();
+      if (d2Clients == null) {
+        if (regionName == null || regionName.isEmpty()) {
+          regionName = VeniceClusterWrapperConstants.STANDALONE_REGION_NAME;
+        }
+        d2Clients = new HashMap<>();
+      }
+      d2Clients.put(regionName, D2TestUtils.getAndStartD2Client(zkServerWrapper.getAddress()));
+
       IntegrationTestUtils.ensureZkPathExists(zkServerWrapper.getAddress(), options.getVeniceZkBasePath());
       if (pubSubBrokerWrapper == null) {
         pubSubBrokerWrapper = ServiceFactory.getPubSubBroker(
@@ -111,7 +124,7 @@ public class VeniceMultiClusterWrapper extends ProcessWrapper {
               .setD2Client(clientConfigD2Client));
       pubBrokerDetails.forEach((key, value) -> controllerProperties.putIfAbsent(key, value));
       VeniceControllerCreateOptions controllerCreateOptions =
-          new VeniceControllerCreateOptions.Builder(clusterNames, zkServerWrapper, pubSubBrokerWrapper)
+          new VeniceControllerCreateOptions.Builder(clusterNames, zkServerWrapper, pubSubBrokerWrapper, d2Clients)
               .multiRegion(options.isMultiRegion())
               .regionName(options.getRegionName())
               .veniceZkBasePath(options.getVeniceZkBasePath())
@@ -163,7 +176,8 @@ public class VeniceMultiClusterWrapper extends ProcessWrapper {
               .sslToStorageNodes(options.isSslToStorageNodes())
               .extraProperties(extraProperties)
               .forkServer(options.isForkServer())
-              .kafkaClusterMap(options.getKafkaClusterMap());
+              .kafkaClusterMap(options.getKafkaClusterMap())
+              .d2Clients(d2Clients);
 
       for (int i = 0; i < options.getNumberOfClusters(); i++) {
         // Create a wrapper for cluster without controller.
@@ -209,8 +223,8 @@ public class VeniceMultiClusterWrapper extends ProcessWrapper {
   }
 
   @Override
-  public String getComponentTagForLogging() {
-    return new StringBuilder(getComponentTagPrefix(regionName)).append(getServiceName()).toString();
+  public LogContext getComponentTagForLogging() {
+    return LogContext.newBuilder().setComponentName(getServiceName()).setRegionName(regionName).build();
   }
 
   @Override

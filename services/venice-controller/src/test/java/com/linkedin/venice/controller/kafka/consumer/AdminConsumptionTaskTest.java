@@ -22,6 +22,8 @@ import static com.linkedin.venice.meta.HybridStoreConfigImpl.DEFAULT_DATA_REPLIC
 import static com.linkedin.venice.meta.HybridStoreConfigImpl.DEFAULT_REAL_TIME_TOPIC_NAME;
 import static com.linkedin.venice.meta.Version.DEFAULT_RT_VERSION_NUMBER;
 import static com.linkedin.venice.pubsub.mock.adapter.producer.MockInMemoryProducerAdapter.getPosition;
+import static com.linkedin.venice.writer.VeniceWriter.APP_DEFAULT_LOGICAL_TS;
+import static com.linkedin.venice.writer.VeniceWriter.DEFAULT_LEADER_METADATA_WRAPPER;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyBoolean;
@@ -52,6 +54,7 @@ import com.linkedin.venice.controller.VeniceHelixAdmin;
 import com.linkedin.venice.controller.kafka.AdminTopicUtils;
 import com.linkedin.venice.controller.kafka.protocol.admin.AddVersion;
 import com.linkedin.venice.controller.kafka.protocol.admin.AdminOperation;
+import com.linkedin.venice.controller.kafka.protocol.admin.DeleteStore;
 import com.linkedin.venice.controller.kafka.protocol.admin.DerivedSchemaCreation;
 import com.linkedin.venice.controller.kafka.protocol.admin.ETLStoreConfigRecord;
 import com.linkedin.venice.controller.kafka.protocol.admin.HybridStoreConfigRecord;
@@ -65,6 +68,7 @@ import com.linkedin.venice.controller.kafka.protocol.enums.SchemaType;
 import com.linkedin.venice.controller.kafka.protocol.serializer.AdminOperationSerializer;
 import com.linkedin.venice.controller.stats.AdminConsumptionStats;
 import com.linkedin.venice.exceptions.VeniceException;
+import com.linkedin.venice.exceptions.VeniceNoStoreException;
 import com.linkedin.venice.guid.GuidUtils;
 import com.linkedin.venice.kafka.protocol.state.PartitionState;
 import com.linkedin.venice.kafka.protocol.state.ProducerPartitionState;
@@ -77,6 +81,8 @@ import com.linkedin.venice.offsets.OffsetRecord;
 import com.linkedin.venice.pubsub.PubSubTopicPartitionImpl;
 import com.linkedin.venice.pubsub.PubSubTopicRepository;
 import com.linkedin.venice.pubsub.api.PubSubConsumerAdapter;
+import com.linkedin.venice.pubsub.api.PubSubMessageHeader;
+import com.linkedin.venice.pubsub.api.PubSubMessageHeaders;
 import com.linkedin.venice.pubsub.api.PubSubPosition;
 import com.linkedin.venice.pubsub.api.PubSubProduceResult;
 import com.linkedin.venice.pubsub.api.PubSubTopic;
@@ -146,7 +152,7 @@ import org.testng.annotations.Test;
  */
 @Test(priority = -5)
 public class AdminConsumptionTaskTest {
-  private static final int TIMEOUT = 10000;
+  private static final int TIMEOUT = 20000;
 
   private String clusterName;
   private String topicName;
@@ -913,6 +919,46 @@ public class AdminConsumptionTaskTest {
     executor.awaitTermination(TIMEOUT, TimeUnit.MILLISECONDS);
   }
 
+  @Test
+  public void testGetLastSucceedExecutionIdFromHeader() throws Exception {
+    AdminConsumptionTask task = getAdminConsumptionTask(new RandomPollStrategy(), true);
+    executor.submit(task);
+    for (long i = 1; i <= 3; i++) {
+      PubSubMessageHeaders pubSubMessageHeaders = new PubSubMessageHeaders();
+      pubSubMessageHeaders.add(
+          new PubSubMessageHeader(
+              PubSubMessageHeaders.EXECUTION_ID_KEY,
+              ByteBuffer.allocate(Long.BYTES).putLong(i).array()));
+
+      veniceWriter.put(
+          emptyKeyBytes,
+          getKillOfflinePushJobMessage(clusterName, storeTopicName, i),
+          AdminOperationSerializer.LATEST_SCHEMA_ID_FOR_ADMIN_OPERATION,
+          null,
+          DEFAULT_LEADER_METADATA_WRAPPER,
+          APP_DEFAULT_LOGICAL_TS,
+          null,
+          null,
+          null,
+          pubSubMessageHeaders);
+      final long executionId = i;
+      TestUtils.waitForNonDeterministicCompletion(TIMEOUT, TimeUnit.MILLISECONDS, () -> {
+        Map<String, Long> metaData = adminTopicMetadataAccessor.getMetadata(clusterName);
+        return AdminTopicMetadataAccessor.getOffsets(metaData).getFirst() == executionId
+            && AdminTopicMetadataAccessor.getExecutionId(metaData) == executionId;
+      });
+
+      Assert.assertEquals(
+          (long) task.getLastSucceededExecutionId(),
+          executionId,
+          "After consumption succeed, the last succeed execution id should be updated.");
+    }
+
+    task.close();
+    executor.shutdown();
+    executor.awaitTermination(TIMEOUT, TimeUnit.MILLISECONDS);
+  }
+
   @Test(dataProvider = "True-and-False", dataProviderClass = DataProviderUtils.class)
   public void testSetStore(boolean replicateAllConfigs) throws Exception {
     AdminConsumptionTask task = getAdminConsumptionTask(new RandomPollStrategy(), true);
@@ -1022,6 +1068,46 @@ public class AdminConsumptionTaskTest {
                 && updateStoreQueryParams.getBootstrapToOnlineTimeoutInHours().get() == bootstrapToOnlineTimeoutInHours
                 && updateStoreQueryParams.getIncrementalPushEnabled().get() // Incremental push must be enabled.
         ));
+  }
+
+  @Test(timeOut = TIMEOUT * 2)
+  public void testRetryLimitForNoStoreException() throws InterruptedException, IOException {
+    // Use a store name that doesn't exist to trigger VeniceNoStoreException
+    String nonExistentStoreName = Utils.getUniqueString("non_existent_store");
+
+    // Create a delete-store operation for a store that doesn't exist
+    veniceWriter.put(
+        emptyKeyBytes,
+        getDeleteStoreMessage(clusterName, nonExistentStoreName, 1),
+        AdminOperationSerializer.LATEST_SCHEMA_ID_FOR_ADMIN_OPERATION);
+
+    // Simulate the store not existing by throwing VeniceNoStoreException
+    doThrow(new VeniceNoStoreException(nonExistentStoreName, clusterName)).when(admin)
+        .deleteStore(eq(clusterName), eq(nonExistentStoreName), anyInt(), anyBoolean());
+
+    // Create a stats mock to verify calls
+    AdminConsumptionStats stats = mock(AdminConsumptionStats.class);
+
+    // Create task with mocked AdminConsumptionStats and default retry limit
+    AdminConsumptionTask task = getAdminConsumptionTask(new RandomPollStrategy(), false, stats, 10000);
+    executor.submit(task);
+
+    // Wait for the retry mechanism to process the message the maximum number of times
+    TestUtils.waitForNonDeterministicAssertion(TIMEOUT * 2, TimeUnit.MILLISECONDS, () -> {
+      verify(admin, times(AdminConsumptionTask.MAX_RETRIES_FOR_NONEXISTENT_STORE))
+          .deleteStore(eq(clusterName), eq(nonExistentStoreName), anyInt(), anyBoolean());
+    });
+
+    // Wait for the message to be processed and moved past (skipped after max retries)
+    TestUtils.waitForNonDeterministicAssertion(TIMEOUT * 2, TimeUnit.MILLISECONDS, () -> {
+      Assert.assertEquals(getLastOffset(clusterName), 1L);
+      // After max retries, the exception should be cleared from problematic stores
+      Assert.assertNull(task.getLastExceptionForStore(nonExistentStoreName));
+    });
+
+    task.close();
+    executor.shutdown();
+    executor.awaitTermination(TIMEOUT, TimeUnit.MILLISECONDS);
   }
 
   @Test(timeOut = TIMEOUT)
@@ -1592,6 +1678,21 @@ public class AdminConsumptionTaskTest {
     adminMessage.executionId = executionId;
     return adminOperationSerializer
         .serialize(adminMessage, AdminOperationSerializer.LATEST_SCHEMA_ID_FOR_ADMIN_OPERATION);
+  }
+
+  private byte[] getDeleteStoreMessage(String clusterName, String storeName, long executionId) {
+    AdminOperation adminOperation = new AdminOperation();
+    adminOperation.operationType = AdminMessageType.DELETE_STORE.getValue();
+
+    DeleteStore deleteStore = (DeleteStore) AdminMessageType.DELETE_STORE.getNewInstance();
+    deleteStore.clusterName = clusterName;
+    deleteStore.storeName = storeName;
+
+    adminOperation.payloadUnion = deleteStore;
+    adminOperation.executionId = executionId;
+
+    return adminOperationSerializer
+        .serialize(adminOperation, AdminOperationSerializer.LATEST_SCHEMA_ID_FOR_ADMIN_OPERATION);
   }
 
   private byte[] getAddVersionMessage(

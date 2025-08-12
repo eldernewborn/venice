@@ -11,6 +11,7 @@ import com.linkedin.venice.controller.kafka.protocol.enums.AdminMessageType;
 import com.linkedin.venice.controller.kafka.protocol.serializer.AdminOperationSerializer;
 import com.linkedin.venice.controller.stats.AdminConsumptionStats;
 import com.linkedin.venice.exceptions.VeniceException;
+import com.linkedin.venice.exceptions.VeniceNoStoreException;
 import com.linkedin.venice.exceptions.validation.DataValidationException;
 import com.linkedin.venice.exceptions.validation.DuplicateDataException;
 import com.linkedin.venice.exceptions.validation.MissingDataException;
@@ -27,6 +28,8 @@ import com.linkedin.venice.pubsub.PubSubTopicRepository;
 import com.linkedin.venice.pubsub.api.DefaultPubSubMessage;
 import com.linkedin.venice.pubsub.api.PubSubConsumerAdapter;
 import com.linkedin.venice.pubsub.api.PubSubMessage;
+import com.linkedin.venice.pubsub.api.PubSubMessageHeader;
+import com.linkedin.venice.pubsub.api.PubSubMessageHeaders;
 import com.linkedin.venice.pubsub.api.PubSubTopic;
 import com.linkedin.venice.pubsub.api.PubSubTopicPartition;
 import com.linkedin.venice.pubsub.manager.TopicManager;
@@ -38,6 +41,7 @@ import com.linkedin.venice.utils.Utils;
 import com.linkedin.venice.utils.locks.AutoCloseableLock;
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -74,6 +78,8 @@ public class AdminConsumptionTask implements Runnable, Closeable {
     long offset;
     Exception exception;
   }
+
+  public static final int MAX_RETRIES_FOR_NONEXISTENT_STORE = 10;
 
   // A simplified version of ProducerTracker that only checks against previous message's producer info.
   private static class ProducerInfo {
@@ -168,6 +174,8 @@ public class AdminConsumptionTask implements Runnable, Closeable {
    */
   private final ConcurrentHashMap<String, AdminErrorInfo> problematicStores;
   private final Queue<DefaultPubSubMessage> undelegatedRecords;
+
+  private final Map<String, Map<Long, Integer>> storeRetryCountMap;
 
   private final ExecutionIdAccessor executionIdAccessor;
   private ExecutorService executorService;
@@ -294,6 +302,7 @@ public class AdminConsumptionTask implements Runnable, Closeable {
     this.stats.setAdminConsumptionFailedOffset(failingOffset);
     this.pubSubTopic = pubSubTopicRepository.getTopic(topic);
     this.regionName = regionName;
+    this.storeRetryCountMap = new ConcurrentHashMap<>();
 
     if (remoteConsumptionEnabled) {
       if (!remoteKafkaServerUrl.isPresent()) {
@@ -574,7 +583,54 @@ public class AdminConsumptionTask implements Runnable, Closeable {
             int perStorePendingMessagesCount = storeQueue == null ? 0 : storeQueue.size();
             pendingAdminMessagesCount += perStorePendingMessagesCount;
             storesWithPendingAdminMessagesCount += perStorePendingMessagesCount > 0 ? 1 : 0;
-            if (e instanceof CancellationException) {
+
+            // Check if the cause is VeniceNoStoreException
+            Throwable cause = e.getCause();
+            if (cause instanceof VeniceNoStoreException) {
+              // Get the retry count for this store and version combination
+              Map<Long, Integer> retryCountMap =
+                  storeRetryCountMap.computeIfAbsent(storeName, s -> new ConcurrentHashMap<>());
+              AdminOperationWrapper nextOp = storeQueue != null ? storeQueue.peek() : null;
+              boolean allowAutoSkip = false;
+              if (nextOp != null) {
+                AdminMessageType messageType = AdminMessageType.valueOf(nextOp.getAdminOperation());
+                // Only allow auto skipping when store not exist for update-store and delete-store admin messages.
+                allowAutoSkip =
+                    messageType == AdminMessageType.UPDATE_STORE || messageType == AdminMessageType.DELETE_STORE;
+              }
+
+              long offset = nextOp != null ? nextOp.getOffset() : UNASSIGNED_VALUE;
+              int currentRetryCount = retryCountMap.getOrDefault(offset, 0);
+
+              if (currentRetryCount >= MAX_RETRIES_FOR_NONEXISTENT_STORE && allowAutoSkip) {
+                // We've reached the maximum retry limit for this store/message, so remove it from the queue
+                if (storeQueue != null && !storeQueue.isEmpty()) {
+                  AdminOperationWrapper removedOp = storeQueue.remove();
+                  LOGGER.info(
+                      "Exceeded maximum retry attempts ({}) for store {} that does not exist. Skipping admin message with offset {}.",
+                      MAX_RETRIES_FOR_NONEXISTENT_STORE,
+                      storeName,
+                      removedOp.getOffset());
+                  retryCountMap.remove(offset);
+                  problematicStores.remove(storeName);
+                  continue;
+                }
+              } else {
+                // Increment the retry count
+                retryCountMap.put(offset, currentRetryCount + 1);
+                LOGGER.warn(
+                    "Store {} does not exist. Retry attempt {}/{}. Will retry admin message with offset {}.",
+                    storeName,
+                    currentRetryCount + 1,
+                    MAX_RETRIES_FOR_NONEXISTENT_STORE,
+                    offset);
+
+                // Add the error info as normal for retry
+                errorInfo.exception = (VeniceNoStoreException) cause;
+                errorInfo.offset = offset;
+                problematicStores.put(storeName, errorInfo);
+              }
+            } else if (e instanceof CancellationException) {
               long lastSucceededId = lastSucceededExecutionIdMap.getOrDefault(storeName, UNASSIGNED_VALUE);
               long newLastSucceededId = newLastSucceededExecutionIdMap.getOrDefault(storeName, UNASSIGNED_VALUE);
 
@@ -720,7 +776,20 @@ public class AdminConsumptionTask implements Runnable, Closeable {
     }
     Put put = (Put) kafkaValue.payloadUnion;
     AdminOperation adminOperation = deserializer.deserialize(put.putValue, put.schemaId);
-    long executionId = adminOperation.executionId;
+    PubSubMessageHeader header = record.getPubSubMessageHeaders().get(PubSubMessageHeaders.EXECUTION_ID_KEY);
+    long executionId = adminOperation.executionId; // fallback default
+    if (header != null) {
+      try {
+        executionId = ByteBuffer.wrap(header.value()).getLong();
+        if (executionId != adminOperation.executionId) {
+          LOGGER.error(
+              "Execution id in header does not match the one in the message payload. Fallback to reading it from the payload");
+          executionId = adminOperation.executionId;
+        }
+      } catch (Exception e) {
+        LOGGER.error("Failed to read execution id from the message header, fallback to reading it from the payload", e);
+      }
+    }
     try {
       checkAndValidateMessage(adminOperation, record);
       LOGGER.info(
@@ -968,7 +1037,7 @@ public class AdminConsumptionTask implements Runnable, Closeable {
     return lastPersistedExecutionId;
   }
 
-  Long getLastSucceededExecutionId(String storeName) {
+  public Long getLastSucceededExecutionId(String storeName) {
     if (lastSucceededExecutionIdMap != null) {
       return lastSucceededExecutionIdMap.get(storeName);
     } else {

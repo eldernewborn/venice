@@ -243,7 +243,7 @@ public class AdminSparkServer extends AbstractVeniceService {
     }
 
     httpService.before((request, response) -> {
-      LogContext.setStructuredLogContext(logContext);
+      LogContext.setLogContext(logContext);
       AuditInfo audit = new AuditInfo(request);
       LOGGER.info(audit.toString());
       SparkServerStats stats = statsMap.get(request.queryParams(CLUSTER));
@@ -273,7 +273,7 @@ public class AdminSparkServer extends AbstractVeniceService {
 
     // filter for blocked api calls
     httpService.before((request, response) -> {
-      LogContext.setStructuredLogContext(logContext);
+      LogContext.setLogContext(logContext);
       if (disabledRoutes.contains(ControllerRoute.valueOfPath(request.uri()))) {
         httpService.halt(403, String.format("Route %s has been disabled in venice controller config!!", request.uri()));
       }
@@ -287,10 +287,10 @@ public class AdminSparkServer extends AbstractVeniceService {
       }
       long latency = System.currentTimeMillis() - (long) request.attribute(REQUEST_START_TIME);
       if ((boolean) request.attribute(REQUEST_SUCCEED)) {
-        LOGGER.info(audit.successString());
+        LOGGER.info(audit.successString(latency));
         stats.recordSuccessfulRequestLatency(latency);
       } else {
-        LOGGER.info(audit.failureString(response.body()));
+        LOGGER.info(audit.failureString(response.body(), latency));
         stats.recordFailedRequestLatency(latency);
       }
       LogContext.clearLogContext();

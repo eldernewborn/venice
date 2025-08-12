@@ -1,6 +1,8 @@
 package com.linkedin.venice.pubsub.mock.adapter.consumer;
 
+import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.pubsub.PubSubTopicPartitionInfo;
+import com.linkedin.venice.pubsub.PubSubUtil;
 import com.linkedin.venice.pubsub.api.DefaultPubSubMessage;
 import com.linkedin.venice.pubsub.api.PubSubConsumerAdapter;
 import com.linkedin.venice.pubsub.api.PubSubPosition;
@@ -13,12 +15,16 @@ import com.linkedin.venice.pubsub.mock.InMemoryPubSubPosition;
 import com.linkedin.venice.pubsub.mock.adapter.admin.MockInMemoryAdminAdapter;
 import com.linkedin.venice.pubsub.mock.adapter.consumer.poll.PollStrategy;
 import com.linkedin.venice.utils.concurrent.VeniceConcurrentHashMap;
+import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.annotation.Nonnull;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 
 /**
@@ -34,8 +40,10 @@ import java.util.Set;
  *
  */
 public class MockInMemoryConsumerAdapter implements PubSubConsumerAdapter {
+  private static final Logger LOGGER = LogManager.getLogger(MockInMemoryConsumerAdapter.class);
+
   private final InMemoryPubSubBroker broker;
-  private final Map<PubSubTopicPartition, InMemoryPubSubPosition> offsets = new VeniceConcurrentHashMap<>();
+  private final Map<PubSubTopicPartition, InMemoryPubSubPosition> lastReadPositions = new VeniceConcurrentHashMap<>();
   private final PollStrategy pollStrategy;
   private final PubSubConsumerAdapter delegate;
   private final Set<PubSubTopicPartition> pausedTopicPartitions = VeniceConcurrentHashMap.newKeySet();
@@ -63,26 +71,56 @@ public class MockInMemoryConsumerAdapter implements PubSubConsumerAdapter {
 
   @Override
   public synchronized void subscribe(PubSubTopicPartition pubSubTopicPartition, PubSubPosition lastReadPubSubPosition) {
-    InMemoryPubSubPosition lastReadPosition;
-    if (lastReadPubSubPosition == PubSubSymbolicPosition.EARLIEST) {
-      lastReadPosition = InMemoryPubSubPosition.of(-1L);
-    } else if (lastReadPubSubPosition == PubSubSymbolicPosition.LATEST) {
-      lastReadPosition = (InMemoryPubSubPosition) endPosition(pubSubTopicPartition);
-    } else if (lastReadPubSubPosition instanceof InMemoryPubSubPosition) {
-      lastReadPosition = (InMemoryPubSubPosition) lastReadPubSubPosition;
+    subscribe(pubSubTopicPartition, lastReadPubSubPosition, false);
+  }
+
+  @Override
+  public synchronized void subscribe(
+      @Nonnull PubSubTopicPartition pubSubTopicPartition,
+      @Nonnull PubSubPosition position,
+      boolean isInclusive) {
+    LOGGER.info(
+        "Requested subscription to topic-partition: {} with position: {} isInclusive: {}",
+        pubSubTopicPartition,
+        position,
+        isInclusive);
+
+    long seekOffset;
+
+    if (position == PubSubSymbolicPosition.EARLIEST) {
+      seekOffset = 0L; // start from first available record
+    } else if (position == PubSubSymbolicPosition.LATEST) {
+      PubSubPosition resolved = endPosition(pubSubTopicPartition);
+      if (!(resolved instanceof InMemoryPubSubPosition)) {
+        throw new IllegalStateException(
+            "endPosition returned unsupported type: " + resolved.getClass().getSimpleName());
+      }
+      seekOffset = ((InMemoryPubSubPosition) resolved).getInternalOffset();
+    } else if (position instanceof InMemoryPubSubPosition) {
+      long inputOffset = ((InMemoryPubSubPosition) position).getInternalOffset();
+      seekOffset = PubSubUtil.calculateSeekOffset(inputOffset, isInclusive);
     } else {
-      throw new IllegalArgumentException("Unsupported PubSubPosition type: " + lastReadPubSubPosition.getClass());
+      throw new IllegalArgumentException("Unsupported PubSubPosition type: " + position.getClass());
     }
 
+    InMemoryPubSubPosition seekToPosition = InMemoryPubSubPosition.of(seekOffset);
+    InMemoryPubSubPosition lastReadPosition = InMemoryPubSubPosition.of(seekOffset - 1);
+
     pausedTopicPartitions.remove(pubSubTopicPartition);
-    delegate.subscribe(pubSubTopicPartition, lastReadPosition);
-    offsets.put(pubSubTopicPartition, lastReadPosition);
+    delegate.subscribe(pubSubTopicPartition, seekToPosition);
+    lastReadPositions.put(pubSubTopicPartition, lastReadPosition);
+
+    LOGGER.info(
+        "Subscribed to topic-partition: {} from position: {} (last read set to {})",
+        pubSubTopicPartition,
+        seekToPosition,
+        lastReadPosition);
   }
 
   @Override
   public synchronized void unSubscribe(PubSubTopicPartition pubSubTopicPartition) {
     delegate.unSubscribe(pubSubTopicPartition);
-    offsets.remove(pubSubTopicPartition);
+    lastReadPositions.remove(pubSubTopicPartition);
     pausedTopicPartitions.remove(pubSubTopicPartition);
   }
 
@@ -90,7 +128,7 @@ public class MockInMemoryConsumerAdapter implements PubSubConsumerAdapter {
   public synchronized void batchUnsubscribe(Set<PubSubTopicPartition> pubSubTopicPartitionSet) {
     delegate.batchUnsubscribe(pubSubTopicPartitionSet);
     for (PubSubTopicPartition topicPartition: pubSubTopicPartitionSet) {
-      offsets.remove(topicPartition);
+      lastReadPositions.remove(topicPartition);
       pausedTopicPartitions.remove(topicPartition);
     }
   }
@@ -101,14 +139,14 @@ public class MockInMemoryConsumerAdapter implements PubSubConsumerAdapter {
       throw new PubSubUnsubscribedTopicPartitionException(pubSubTopicPartition);
     }
     delegate.resetOffset(pubSubTopicPartition);
-    offsets.put(pubSubTopicPartition, InMemoryPubSubPosition.of(-1L));
+    lastReadPositions.put(pubSubTopicPartition, InMemoryPubSubPosition.of(-1L));
   }
 
   @Override
   public synchronized void close() {
     delegate.close();
     pausedTopicPartitions.clear();
-    offsets.clear();
+    lastReadPositions.clear();
   }
 
   @Override
@@ -120,7 +158,7 @@ public class MockInMemoryConsumerAdapter implements PubSubConsumerAdapter {
     }
 
     Map<PubSubTopicPartition, InMemoryPubSubPosition> offsetsToPoll = new HashMap<>();
-    for (Map.Entry<PubSubTopicPartition, InMemoryPubSubPosition> entry: offsets.entrySet()) {
+    for (Map.Entry<PubSubTopicPartition, InMemoryPubSubPosition> entry: lastReadPositions.entrySet()) {
       PubSubTopicPartition topicPartition = entry.getKey();
       InMemoryPubSubPosition offset = entry.getValue();
       if (!pausedTopicPartitions.contains(entry.getKey())) {
@@ -133,8 +171,8 @@ public class MockInMemoryConsumerAdapter implements PubSubConsumerAdapter {
     for (Map.Entry<PubSubTopicPartition, InMemoryPubSubPosition> entry: offsetsToPoll.entrySet()) {
       PubSubTopicPartition topicPartition = entry.getKey();
       InMemoryPubSubPosition offsetToPoll = entry.getValue();
-      if (offsets.containsKey(topicPartition)) {
-        offsets.put(topicPartition, offsetToPoll);
+      if (lastReadPositions.containsKey(topicPartition)) {
+        lastReadPositions.put(topicPartition, offsetToPoll);
       }
     }
     return pubSubMessages;
@@ -142,16 +180,16 @@ public class MockInMemoryConsumerAdapter implements PubSubConsumerAdapter {
 
   @Override
   public synchronized boolean hasAnySubscription() {
-    return !offsets.isEmpty();
+    return !lastReadPositions.isEmpty();
   }
 
   @Override
   public synchronized boolean hasSubscription(PubSubTopicPartition pubSubTopicPartition) {
-    return offsets.containsKey(pubSubTopicPartition);
+    return lastReadPositions.containsKey(pubSubTopicPartition);
   }
 
-  public synchronized Map<PubSubTopicPartition, InMemoryPubSubPosition> getOffsets() {
-    return offsets;
+  public synchronized Map<PubSubTopicPartition, InMemoryPubSubPosition> getLastReadPositions() {
+    return lastReadPositions;
   }
 
   @Override
@@ -170,7 +208,7 @@ public class MockInMemoryConsumerAdapter implements PubSubConsumerAdapter {
 
   @Override
   public synchronized Set<PubSubTopicPartition> getAssignment() {
-    return offsets.keySet();
+    return lastReadPositions.keySet();
   }
 
   @Override
@@ -197,13 +235,19 @@ public class MockInMemoryConsumerAdapter implements PubSubConsumerAdapter {
   }
 
   @Override
-  public synchronized Long beginningOffset(PubSubTopicPartition partition, Duration timeout) {
-    return 0L;
+  public synchronized PubSubPosition beginningPosition(PubSubTopicPartition pubSubTopicPartition, Duration timeout) {
+    return InMemoryPubSubPosition.of(0);
   }
 
   @Override
-  public synchronized PubSubPosition beginningPosition(PubSubTopicPartition pubSubTopicPartition, Duration timeout) {
-    return PubSubSymbolicPosition.EARLIEST;
+  public Map<PubSubTopicPartition, PubSubPosition> beginningPositions(
+      Collection<PubSubTopicPartition> partitions,
+      Duration timeout) {
+    Map<PubSubTopicPartition, PubSubPosition> retPositions = new HashMap<>(partitions.size());
+    for (PubSubTopicPartition pubSubTopicPartition: partitions) {
+      retPositions.put(pubSubTopicPartition, beginningPosition(pubSubTopicPartition, timeout));
+    }
+    return retPositions;
   }
 
   @Override
@@ -246,6 +290,35 @@ public class MockInMemoryConsumerAdapter implements PubSubConsumerAdapter {
       return adminAdapter.partitionsFor(topic);
     } else {
       throw new UnsupportedOperationException("In-memory admin adapter is not set");
+    }
+  }
+
+  @Override
+  public long comparePositions(PubSubTopicPartition partition, PubSubPosition position1, PubSubPosition position2) {
+    return positionDifference(partition, position1, position2);
+  }
+
+  @Override
+  public long positionDifference(PubSubTopicPartition partition, PubSubPosition position1, PubSubPosition position2) {
+    return PubSubUtil.computeOffsetDelta(
+        partition,
+        position1,
+        position2,
+        this,
+        InMemoryPubSubPosition.class,
+        InMemoryPubSubPosition::getInternalOffset);
+  }
+
+  @Override
+  public PubSubPosition decodePosition(PubSubTopicPartition partition, int positionTypeId, ByteBuffer buffer) {
+    try {
+      if (buffer.remaining() < Long.BYTES) {
+        throw new VeniceException("Buffer too short to decode InMemoryPubSubPosition: " + buffer);
+      }
+      long offset = buffer.getLong();
+      return InMemoryPubSubPosition.of(offset);
+    } catch (Exception e) {
+      throw new VeniceException("Failed to decode InMemoryPubSubPosition from buffer: " + buffer, e);
     }
   }
 

@@ -21,6 +21,7 @@ import static com.linkedin.venice.vpj.VenicePushJobConstants.VENICE_STORE_NAME_P
 
 import com.github.luben.zstd.ZstdDictTrainer;
 import com.google.common.base.Preconditions;
+import com.linkedin.d2.balancer.D2Client;
 import com.linkedin.venice.client.store.ClientConfig;
 import com.linkedin.venice.common.VeniceSystemStoreType;
 import com.linkedin.venice.compression.CompressionStrategy;
@@ -48,6 +49,7 @@ import com.linkedin.venice.serialization.avro.VeniceAvroKafkaSerializer;
 import com.linkedin.venice.utils.ExceptionUtils;
 import com.linkedin.venice.utils.ForkedJavaProcess;
 import com.linkedin.venice.utils.IntegrationTestPushUtils;
+import com.linkedin.venice.utils.LogContext;
 import com.linkedin.venice.utils.PropertyBuilder;
 import com.linkedin.venice.utils.SslUtils;
 import com.linkedin.venice.utils.TestUtils;
@@ -208,11 +210,22 @@ public class VeniceClusterWrapper extends ProcessWrapper {
 
     ZkServerWrapper zkServerWrapper = options.getZkServerWrapper();
     PubSubBrokerWrapper pubSubBrokerWrapper = options.getKafkaBrokerWrapper();
+    Map<String, D2Client> d2Clients = options.getD2Clients();
     try {
       if (zkServerWrapper == null) {
         zkServerWrapper = ServiceFactory.getZkServer();
       }
       IntegrationTestUtils.ensureZkPathExists(zkServerWrapper.getAddress(), options.getVeniceZkBasePath());
+
+      // Set local d2Client for the cluster.
+      String regionName = options.getRegionName();
+      if (d2Clients.isEmpty()) {
+        if (regionName == null || regionName.isEmpty()) {
+          regionName = VeniceClusterWrapperConstants.STANDALONE_REGION_NAME;
+        }
+      }
+      d2Clients.put(regionName, D2TestUtils.getAndStartD2Client(zkServerWrapper.getAddress()));
+
       if (pubSubBrokerWrapper == null) {
         pubSubBrokerWrapper = ServiceFactory.getPubSubBroker(
             new PubSubBrokerConfigs.Builder().setZkWrapper(zkServerWrapper)
@@ -243,22 +256,25 @@ public class VeniceClusterWrapper extends ProcessWrapper {
         }
 
         VeniceControllerWrapper veniceControllerWrapper = ServiceFactory.getVeniceController(
-            new VeniceControllerCreateOptions.Builder(options.getClusterName(), zkServerWrapper, pubSubBrokerWrapper)
-                .multiRegion(options.isMultiRegion())
-                .veniceZkBasePath(options.getVeniceZkBasePath())
-                .replicationFactor(options.getReplicationFactor())
-                .partitionSize(options.getPartitionSize())
-                .numberOfPartitions(options.getNumberOfPartitions())
-                .maxNumberOfPartitions(options.getMaxNumberOfPartitions())
-                .rebalanceDelayMs(options.getRebalanceDelayMs())
-                .clusterToD2(clusterToD2)
-                .clusterToServerD2(clusterToServerD2)
-                .sslToKafka(options.isSslToKafka())
-                .d2Enabled(true)
-                .regionName(options.getRegionName())
-                .extraProperties(options.getExtraProperties())
-                .dynamicAccessController(options.getAccessController())
-                .build());
+            new VeniceControllerCreateOptions.Builder(
+                options.getClusterName(),
+                zkServerWrapper,
+                pubSubBrokerWrapper,
+                d2Clients).multiRegion(options.isMultiRegion())
+                    .veniceZkBasePath(options.getVeniceZkBasePath())
+                    .replicationFactor(options.getReplicationFactor())
+                    .partitionSize(options.getPartitionSize())
+                    .numberOfPartitions(options.getNumberOfPartitions())
+                    .maxNumberOfPartitions(options.getMaxNumberOfPartitions())
+                    .rebalanceDelayMs(options.getRebalanceDelayMs())
+                    .clusterToD2(clusterToD2)
+                    .clusterToServerD2(clusterToServerD2)
+                    .sslToKafka(options.isSslToKafka())
+                    .d2Enabled(true)
+                    .regionName(options.getRegionName())
+                    .extraProperties(options.getExtraProperties())
+                    .dynamicAccessController(options.getAccessController())
+                    .build());
         LOGGER.info(
             "[{}][{}] Created child controller on port {}",
             options.getRegionName(),
@@ -485,11 +501,12 @@ public class VeniceClusterWrapper extends ProcessWrapper {
   }
 
   @Override
-  public String getComponentTagForLogging() {
-    return new StringBuilder(getComponentTagPrefix(options.getRegionName()))
-        .append(getComponentTagPrefix(getClusterName()))
-        .append(getServiceName())
-        .toString();
+  public LogContext getComponentTagForLogging() {
+    return LogContext.newBuilder()
+        .setRegionName(options.getRegionName())
+        .setComponentName(getServiceName())
+        .setInstanceName(Utils.getHelixNodeIdentifier(getHost(), getPort()))
+        .build();
   }
 
   public String getClusterName() {
@@ -599,20 +616,23 @@ public class VeniceClusterWrapper extends ProcessWrapper {
     VeniceControllerWrapper veniceControllerWrapper = null;
     try {
       veniceControllerWrapper = ServiceFactory.getVeniceController(
-          new VeniceControllerCreateOptions.Builder(getClusterName(), zkServerWrapper, pubSubBrokerWrapper)
-              .veniceZkBasePath(options.getVeniceZkBasePath())
-              .regionName(options.getRegionName())
-              .replicationFactor(options.getReplicationFactor())
-              .partitionSize(options.getPartitionSize())
-              .numberOfPartitions(options.getNumberOfPartitions())
-              .maxNumberOfPartitions(options.getMaxNumberOfPartitions())
-              .rebalanceDelayMs(options.getRebalanceDelayMs())
-              .sslToKafka(options.isSslToKafka())
-              .clusterToD2(clusterToD2)
-              .clusterToServerD2(clusterToServerD2)
-              .extraProperties(properties)
-              .dynamicAccessController(options.getAccessController())
-              .build());
+          new VeniceControllerCreateOptions.Builder(
+              getClusterName(),
+              zkServerWrapper,
+              pubSubBrokerWrapper,
+              options.getD2Clients()).veniceZkBasePath(options.getVeniceZkBasePath())
+                  .regionName(options.getRegionName())
+                  .replicationFactor(options.getReplicationFactor())
+                  .partitionSize(options.getPartitionSize())
+                  .numberOfPartitions(options.getNumberOfPartitions())
+                  .maxNumberOfPartitions(options.getMaxNumberOfPartitions())
+                  .rebalanceDelayMs(options.getRebalanceDelayMs())
+                  .sslToKafka(options.isSslToKafka())
+                  .clusterToD2(clusterToD2)
+                  .clusterToServerD2(clusterToServerD2)
+                  .extraProperties(properties)
+                  .dynamicAccessController(options.getAccessController())
+                  .build());
       synchronized (this) {
         veniceControllerWrappers.put(veniceControllerWrapper.getPort(), veniceControllerWrapper);
         setExternalControllerDiscoveryURL(getAllControllersURLs());

@@ -60,7 +60,7 @@ public class SystemStoreRepairTask implements Runnable {
 
   @Override
   public void run() {
-    LogContext.setStructuredLogContext(getParentAdmin().getLogContext());
+    LogContext.setLogContext(getParentAdmin().getLogContext());
     for (String clusterName: getParentAdmin().getClustersLeaderOf()) {
       if (!getClusterToSystemStoreHealthCheckStatsMap().containsKey(clusterName)) {
         continue;
@@ -98,6 +98,11 @@ public class SystemStoreRepairTask implements Runnable {
         try {
           Version version = getNewSystemStoreVersion(clusterName, systemStoreName, pushJobId);
           systemStoreToRepairJobVersionMap.put(systemStoreName, version.getNumber());
+          LOGGER.warn(
+              "Kick off an repair empty push job for store: {} in cluster: {} with expected version number: {}",
+              systemStoreName,
+              clusterName,
+              version.getNumber());
         } catch (Exception e) {
           LOGGER.warn("Unable to run empty push job for store: {} in cluster: {}", systemStoreName, clusterName, e);
         }

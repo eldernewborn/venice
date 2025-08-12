@@ -1,11 +1,8 @@
 package com.linkedin.davinci.consumer;
 
 import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.ROCKSDB_BLOCK_CACHE_SIZE_IN_BYTES;
-import static com.linkedin.davinci.store.rocksdb.RocksDBServerConfig.ROCKSDB_PLAIN_TABLE_FORMAT_ENABLED;
-import static com.linkedin.venice.ConfigKeys.CLIENT_USE_SYSTEM_STORE_REPOSITORY;
 import static com.linkedin.venice.ConfigKeys.DATA_BASE_PATH;
 import static com.linkedin.venice.ConfigKeys.DA_VINCI_SUBSCRIBE_ON_DISK_PARTITIONS_AUTOMATICALLY;
-import static com.linkedin.venice.ConfigKeys.PARTICIPANT_MESSAGE_STORE_ENABLED;
 import static com.linkedin.venice.ConfigKeys.PERSISTENCE_TYPE;
 import static com.linkedin.venice.ConfigKeys.PUSH_STATUS_STORE_ENABLED;
 import static com.linkedin.venice.meta.PersistenceType.ROCKS_DB;
@@ -17,6 +14,7 @@ import com.linkedin.davinci.client.DaVinciConfig;
 import com.linkedin.davinci.client.DaVinciRecordTransformer;
 import com.linkedin.davinci.client.DaVinciRecordTransformerConfig;
 import com.linkedin.davinci.client.DaVinciRecordTransformerResult;
+import com.linkedin.davinci.client.StorageClass;
 import com.linkedin.davinci.client.factory.CachingDaVinciClientFactory;
 import com.linkedin.davinci.consumer.stats.BasicConsumerStats;
 import com.linkedin.venice.annotation.Experimental;
@@ -26,8 +24,8 @@ import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.meta.Version;
 import com.linkedin.venice.pubsub.PubSubTopicImpl;
 import com.linkedin.venice.pubsub.PubSubTopicPartitionImpl;
-import com.linkedin.venice.pubsub.adapter.kafka.common.ApacheKafkaOffsetPosition;
 import com.linkedin.venice.pubsub.api.PubSubMessage;
+import com.linkedin.venice.pubsub.api.PubSubSymbolicPosition;
 import com.linkedin.venice.pubsub.api.PubSubTopicPartition;
 import com.linkedin.venice.utils.PropertyBuilder;
 import com.linkedin.venice.utils.VeniceProperties;
@@ -81,7 +79,6 @@ public class BootstrappingVeniceChangelogConsumerDaVinciRecordTransformerImpl<K,
   private final ExecutorService completableFutureThreadPool = Executors.newFixedThreadPool(1);
 
   private final Set<Integer> subscribedPartitions = new HashSet<>();
-  private final ApacheKafkaOffsetPosition placeHolderOffset = ApacheKafkaOffsetPosition.of(0);
   private final ReentrantLock bufferLock = new ReentrantLock();
   private final Condition bufferIsFullCondition = bufferLock.newCondition();
   private BackgroundReporterThread backgroundReporterThread;
@@ -93,6 +90,7 @@ public class BootstrappingVeniceChangelogConsumerDaVinciRecordTransformerImpl<K,
     this.changelogClientConfig = changelogClientConfig;
     this.storeName = changelogClientConfig.getStoreName();
     DaVinciConfig daVinciConfig = new DaVinciConfig();
+    daVinciConfig.setStorageClass(StorageClass.DISK);
     ClientConfig innerClientConfig = changelogClientConfig.getInnerClientConfig();
     this.pubSubMessages = new ArrayBlockingQueue<>(changelogClientConfig.getMaxBufferSize());
     this.partitionToVersionToServe = new ConcurrentHashMap<>();
@@ -273,15 +271,11 @@ public class BootstrappingVeniceChangelogConsumerDaVinciRecordTransformerImpl<K,
         // We don't need the block cache, since we only read each key once from disk
         .put(ROCKSDB_BLOCK_CACHE_SIZE_IN_BYTES, 0)
         .put(DATA_BASE_PATH, changelogClientConfig.getBootstrapFileSystemPath())
-        .put(ROCKSDB_PLAIN_TABLE_FORMAT_ENABLED, false)
         .put(PERSISTENCE_TYPE, ROCKS_DB)
         // Turning this off, so users don't subscribe to unwanted partitions automatically
         .put(DA_VINCI_SUBSCRIBE_ON_DISK_PARTITIONS_AUTOMATICALLY, false)
-        .put(CLIENT_USE_SYSTEM_STORE_REPOSITORY, true)
+        // This is set to true so it's compatible with blob transfer
         .put(PUSH_STATUS_STORE_ENABLED, true)
-        // Turning this off, as the CDC client will be throttling ingestion based on calls to poll, which can block
-        // version pushes and may delay a version being ready to serve
-        .put(PARTICIPANT_MESSAGE_STORE_ENABLED, false)
         .build();
   }
 
@@ -393,7 +387,7 @@ public class BootstrappingVeniceChangelogConsumerDaVinciRecordTransformerImpl<K,
                   key,
                   changeEvent,
                   pubSubTopicPartitionMap.get(partitionId),
-                  placeHolderOffset,
+                  PubSubSymbolicPosition.EARLIEST,
                   0,
                   0,
                   false));

@@ -72,6 +72,7 @@ import com.linkedin.venice.controllerapi.UpdateStoreQueryParams;
 import com.linkedin.venice.controllerapi.VersionCreationResponse;
 import com.linkedin.venice.controllerapi.VersionResponse;
 import com.linkedin.venice.controllerapi.routes.AdminCommandExecutionResponse;
+import com.linkedin.venice.d2.D2ClientFactory;
 import com.linkedin.venice.datarecovery.DataRecoveryClient;
 import com.linkedin.venice.datarecovery.EstimateDataRecoveryTimeCommand;
 import com.linkedin.venice.datarecovery.MonitorCommand;
@@ -1328,6 +1329,8 @@ public class AdminTool {
     genericParam(cmd, Arg.REGIONS_FILTER, s -> s, p -> params.setRegionsFilter(p), argSet);
     genericParam(cmd, Arg.STORAGE_PERSONA, s -> s, p -> params.setStoragePersona(p), argSet);
     integerParam(cmd, Arg.LATEST_SUPERSET_SCHEMA_ID, p -> params.setLatestSupersetSchemaId(p), argSet);
+    booleanParam(cmd, Arg.ENABLE_COMPACTION, p -> params.setCompactionEnabled(p), argSet);
+    longParam(cmd, Arg.COMPACTION_THRESHOLD_MILLISECONDS, p -> params.setCompactionThresholdMilliseconds(p), argSet);
     longParam(cmd, Arg.MIN_COMPACTION_LAG_SECONDS, p -> params.setMinCompactionLagSeconds(p), argSet);
     longParam(cmd, Arg.MAX_COMPACTION_LAG_SECONDS, p -> params.setMaxCompactionLagSeconds(p), argSet);
     integerParam(cmd, Arg.MAX_RECORD_SIZE_BYTES, params::setMaxRecordSizeBytes, argSet);
@@ -1344,6 +1347,7 @@ public class AdminTool {
     integerParam(cmd, Arg.TARGET_SWAP_REGION_WAIT_TIME, p -> params.setTargetRegionSwapWaitTime(p), argSet);
     booleanParam(cmd, Arg.DAVINCI_HEARTBEAT_REPORTED, p -> params.setIsDavinciHeartbeatReported(p), argSet);
     booleanParam(cmd, Arg.GLOBAL_RT_DIV_ENABLED, params::setGlobalRtDivEnabled, argSet);
+    booleanParam(cmd, Arg.ENUM_SCHEMA_EVOLUTION_ALLOWED, params::setEnumSchemaEvolutionAllowed, argSet);
 
     /**
      * {@link Arg#REPLICATE_ALL_CONFIGS} doesn't require parameters; once specified, it means true.
@@ -2201,10 +2205,15 @@ public class AdminTool {
                 (key, value) -> controllerClientMap.put(key, new ControllerClient(clusterName, value, sslFactory)));
       }
       if (response.getChildDataCenterControllerD2Map() != null) {
+        // TODO: D2Client
         response.getChildDataCenterControllerD2Map()
             .forEach(
-                (key, value) -> controllerClientMap
-                    .put(key, new D2ControllerClient(response.getD2ServiceName(), clusterName, value, sslFactory)));
+                (key, value) -> controllerClientMap.put(
+                    key,
+                    new D2ControllerClient(
+                        response.getD2ServiceName(),
+                        clusterName,
+                        D2ClientFactory.getD2Client(value, sslFactory))));
       }
       return controllerClientMap;
     });

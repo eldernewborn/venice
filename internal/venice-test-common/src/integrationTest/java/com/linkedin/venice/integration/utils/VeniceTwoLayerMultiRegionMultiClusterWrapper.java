@@ -18,10 +18,12 @@ import static com.linkedin.venice.ConfigKeys.PUBSUB_SECURITY_PROTOCOL_LEGACY;
 import static com.linkedin.venice.integration.utils.VeniceClusterWrapperConstants.CHILD_REGION_NAME_PREFIX;
 import static com.linkedin.venice.integration.utils.VeniceClusterWrapperConstants.DEFAULT_PARENT_DATA_CENTER_REGION_NAME;
 
+import com.linkedin.d2.balancer.D2Client;
 import com.linkedin.davinci.helix.HelixParticipationService;
 import com.linkedin.davinci.notifier.LeaderErrorNotifier;
 import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.pubsub.api.PubSubSecurityProtocol;
+import com.linkedin.venice.utils.LogContext;
 import com.linkedin.venice.utils.RegionUtils;
 import com.linkedin.venice.utils.Time;
 import com.linkedin.venice.utils.Utils;
@@ -147,6 +149,7 @@ public class VeniceTwoLayerMultiRegionMultiClusterWrapper extends ProcessWrapper
       nativeReplicationRequiredChildControllerProps.put(PARENT_KAFKA_CLUSTER_FABRIC_LIST, parentRegionName);
       nativeReplicationRequiredChildControllerProps
           .put(CHILD_DATA_CENTER_KAFKA_URL_PREFIX + "." + parentRegionName, parentPubSubBrokerWrapper.getAddress());
+      Map<String, D2Client> d2Clients = new HashMap<>();
       for (String regionName: childRegionName) {
         ZkServerWrapper zkServerWrapper = ServiceFactory.getZkServer();
         IntegrationTestUtils.ensureZkPathExists(zkServer.getAddress(), options.getChildVeniceZkBasePath());
@@ -157,6 +160,7 @@ public class VeniceTwoLayerMultiRegionMultiClusterWrapper extends ProcessWrapper
         pubSubBrokerByRegionName.put(regionName, regionalPubSubBrokerWrapper);
         nativeReplicationRequiredChildControllerProps
             .put(CHILD_DATA_CENTER_KAFKA_URL_PREFIX + "." + regionName, regionalPubSubBrokerWrapper.getAddress());
+        d2Clients.put(regionName, D2TestUtils.getAndStartD2Client(zkServerWrapper.getAddress()));
       }
       Properties activeActiveRequiredChildControllerProps = new Properties();
       activeActiveRequiredChildControllerProps.put(ACTIVE_ACTIVE_REAL_TIME_SOURCE_FABRIC_LIST, childRegionList);
@@ -208,7 +212,8 @@ public class VeniceTwoLayerMultiRegionMultiClusterWrapper extends ProcessWrapper
           .sslToStorageNodes(options.isSslToStorageNodes())
           .sslToKafka(options.isSslToKafka())
           .forkServer(options.isForkServer())
-          .kafkaClusterMap(kafkaClusterMap);
+          .kafkaClusterMap(kafkaClusterMap)
+          .d2Clients(d2Clients);
       // Create multi-clusters
       for (int i = 0; i < options.getNumberOfRegions(); i++) {
         String regionName = childRegionName.get(i);
@@ -230,8 +235,10 @@ public class VeniceTwoLayerMultiRegionMultiClusterWrapper extends ProcessWrapper
           false,
           VeniceControllerWrapper.PARENT_D2_CLUSTER_NAME,
           VeniceControllerWrapper.PARENT_D2_SERVICE_NAME);
+      d2Clients.put(parentRegionName + ".parent", D2TestUtils.getAndStartD2Client(zkServer.getAddress()));
       VeniceControllerCreateOptions parentControllerCreateOptions =
-          new VeniceControllerCreateOptions.Builder(clusterNames, zkServer, parentPubSubBrokerWrapper).multiRegion(true)
+          new VeniceControllerCreateOptions.Builder(clusterNames, zkServer, parentPubSubBrokerWrapper, d2Clients)
+              .multiRegion(true)
               .veniceZkBasePath(options.getParentVeniceZkBasePath())
               .replicationFactor(options.getReplicationFactor())
               .childControllers(childControllers)
@@ -343,8 +350,8 @@ public class VeniceTwoLayerMultiRegionMultiClusterWrapper extends ProcessWrapper
   }
 
   @Override
-  public String getComponentTagForLogging() {
-    return getServiceName();
+  public LogContext getComponentTagForLogging() {
+    return LogContext.newBuilder().setComponentName(getServiceName()).build();
   }
 
   @Override
