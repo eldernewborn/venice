@@ -35,7 +35,6 @@ import com.linkedin.venice.kafka.protocol.state.StoreVersionState;
 import com.linkedin.venice.meta.PersistenceType;
 import com.linkedin.venice.meta.Store;
 import com.linkedin.venice.offsets.OffsetRecord;
-import com.linkedin.venice.pubsub.adapter.kafka.common.ApacheKafkaOffsetPosition;
 import com.linkedin.venice.pubsub.api.PubSubConsumerAdapter;
 import com.linkedin.venice.pubsub.api.PubSubMessage;
 import com.linkedin.venice.pubsub.api.PubSubPosition;
@@ -352,7 +351,8 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
         PubSubSymbolicPosition.EARLIEST,
         0,
         value.length * 8,
-        false);
+        false,
+        getNextConsumerSequenceId(partition));
     resultSet.add(record);
   }
 
@@ -375,7 +375,8 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
               PubSubSymbolicPosition.EARLIEST,
               0,
               0,
-              true));
+              true,
+              getNextConsumerSequenceId(partition)));
     }
 
     // Notify that we've caught up
@@ -453,7 +454,8 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
     bootstrapState.currentPubSubPosition = new VeniceChangeCoordinate(
         currentPubSubPosition.getTopic(),
         recordOffset,
-        currentPubSubPosition.getPartition());
+        currentPubSubPosition.getPartition(),
+        getNextConsumerSequenceId(currentPubSubPosition.getPartition()));
 
     bootstrapState.incrementProcessedRecordSizeSinceLastSync(value.array().length);
     if (bootstrapState.getProcessedRecordSizeSinceLastSync() >= syncBytesInterval) {
@@ -488,13 +490,10 @@ class InternalLocalBootstrappingVeniceChangelogConsumer<K, V> extends VeniceAfte
             LOGGER.info(
                 "No local checkpoint found for partition: {}， will initialize checkpoint to offset: {}",
                 partition,
-                offsetRecord.getLocalVersionTopicOffset());
+                offsetRecord.getCheckpointedLocalVtPosition());
             localCheckpoint = new VeniceChangeCoordinate(
                 getTopicPartition(partition).getPubSubTopic().getName(),
-                offsetRecord.getLocalVersionTopicOffset() == -1
-                    ? PubSubSymbolicPosition.EARLIEST
-                    // TODO: Remove once we populate PubSubPosition for local version topic offset
-                    : ApacheKafkaOffsetPosition.of(offsetRecord.getLocalVersionTopicOffset()),
+                offsetRecord.getCheckpointedLocalVtPosition(),
                 partition);
           } else {
             localCheckpoint = VeniceChangeCoordinate

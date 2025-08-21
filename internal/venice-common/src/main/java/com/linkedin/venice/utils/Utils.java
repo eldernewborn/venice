@@ -1,6 +1,7 @@
 package com.linkedin.venice.utils;
 
 import static com.linkedin.venice.HttpConstants.LOCALHOST;
+import static com.linkedin.venice.controllerapi.ControllerApiConstants.*;
 import static com.linkedin.venice.meta.Version.REAL_TIME_TOPIC_SUFFIX;
 
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -17,6 +18,7 @@ import com.linkedin.venice.helix.Replica;
 import com.linkedin.venice.helix.ResourceAssignment;
 import com.linkedin.venice.meta.HybridStoreConfig;
 import com.linkedin.venice.meta.Instance;
+import com.linkedin.venice.meta.LifecycleHooksRecord;
 import com.linkedin.venice.meta.Partition;
 import com.linkedin.venice.meta.PartitionAssignment;
 import com.linkedin.venice.meta.ReadOnlyStoreRepository;
@@ -42,6 +44,7 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -91,6 +94,7 @@ public class Utils {
   public static final AtomicBoolean SUPPRESS_SYSTEM_EXIT = new AtomicBoolean();
   public static final String SEPARATE_TOPIC_SUFFIX = "_sep";
   public static final String FATAL_DATA_VALIDATION_ERROR = "fatal data validation problem";
+  public static final ByteBuffer EMPTY_BYTE_BUFFER = ByteBuffer.wrap(new byte[0]);
 
   /**
    * Print an error and exit with error code 1
@@ -385,6 +389,23 @@ public class Utils {
     } catch (IOException jsonException) {
       throw new VeniceException(fieldName + " must be a valid JSON object, but value: " + value);
     }
+  }
+
+  /**
+   * For Store Lifecycle Hooks value, we expect the command-line interface users to use JSON
+   * format to represent it. This method deserialize it to List<LifecycleHooksRecord>.
+   */
+  public static List<LifecycleHooksRecord> parseStoreLifecycleHooksListFromString(String value, String fieldName) {
+    try {
+      if (value != null) {
+        ObjectMapper objectMapper = ObjectMapperFactory.getInstance();
+        return objectMapper.readValue(value, new TypeReference<List<LifecycleHooksRecord>>() {
+        });
+      }
+    } catch (IOException e) {
+      throw new VeniceException(fieldName + " must be a valid JSON object, but value: " + value);
+    }
+    return Collections.emptyList();
   }
 
   public static String getHelixNodeIdentifier(String hostname, int port) {
