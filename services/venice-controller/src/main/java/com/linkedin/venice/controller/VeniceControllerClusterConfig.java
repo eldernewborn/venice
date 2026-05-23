@@ -85,6 +85,7 @@ import static com.linkedin.venice.ConfigKeys.CONTROLLER_PARENT_SYSTEM_STORE_HEAR
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PARENT_SYSTEM_STORE_REPAIR_CHECK_INTERVAL_SECONDS;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PARENT_SYSTEM_STORE_REPAIR_SERVICE_ENABLED;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PARENT_SYSTEM_STORE_VERSION_REFRESH_THRESHOLD_IN_DAYS;
+import static com.linkedin.venice.ConfigKeys.CONTROLLER_PER_VERSION_ZNODE_WRITE_ENABLED;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PROTOCOL_VERSION_AUTO_DETECTION_SERVICE_ENABLED;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PROTOCOL_VERSION_AUTO_DETECTION_SLEEP_MS;
 import static com.linkedin.venice.ConfigKeys.CONTROLLER_PUBSUB_ALTERNATIVE_BACKEND_ALL;
@@ -529,6 +530,7 @@ public class VeniceControllerClusterConfig {
   private final String sslFactoryClassName;
   private final int refreshAttemptsForZkReconnect;
   private final long refreshIntervalForZkReconnectInMs;
+  private final boolean perVersionZnodeWriteEnabled;
   private final boolean enableOfflinePushSSLAllowlist;
   private final boolean enableNearlinePushSSLAllowlist;
   private final List<String> pushSSLAllowlist;
@@ -829,6 +831,7 @@ public class VeniceControllerClusterConfig {
     this.refreshAttemptsForZkReconnect = props.getInt(REFRESH_ATTEMPTS_FOR_ZK_RECONNECT, 9);
     this.refreshIntervalForZkReconnectInMs =
         props.getLong(REFRESH_INTERVAL_FOR_ZK_RECONNECT_MS, TimeUnit.SECONDS.toMillis(10));
+    this.perVersionZnodeWriteEnabled = props.getBoolean(CONTROLLER_PER_VERSION_ZNODE_WRITE_ENABLED, false);
     this.enableOfflinePushSSLAllowlist = props.getBooleanWithAlternative(
         ENABLE_OFFLINE_PUSH_SSL_ALLOWLIST,
         // go/inclusivecode deferred(Reference will be removed when clients have migrated)
@@ -1589,6 +1592,10 @@ public class VeniceControllerClusterConfig {
 
   public long getRefreshIntervalForZkReconnectInMs() {
     return refreshIntervalForZkReconnectInMs;
+  }
+
+  public boolean isPerVersionZnodeWriteEnabled() {
+    return perVersionZnodeWriteEnabled;
   }
 
   public boolean isEnableOfflinePushSSLAllowlist() {
